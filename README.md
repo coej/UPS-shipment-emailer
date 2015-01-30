@@ -1,2 +1,2 @@
 # UPS-shipment-emailer
-Using the UPS shipping API and tables of customer and shipment info, fill fields in an email template and send notification emails to customers through gmail.
+Using the UPS shipping API and tables of customer and shipment info, fill fields in an email template and send notification emails to customers through gmail. (Not currently working, as some vendor-specific data had to be removed before sharing. Template files should be re-added, and the structure of tables for customer and shipment information lookup should be made more generic.)
