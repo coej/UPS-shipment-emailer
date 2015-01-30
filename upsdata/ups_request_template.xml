@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<AccessRequest xml:lang="en-US">
+	<AccessLicenseNumber>{ACCESS_LICENSE}</AccessLicenseNumber>
+	<UserId>{USERID}</UserId>
+	<Password>{PASS}</Password>
+</AccessRequest>
+<?xml version="1.0"?>
+<TrackRequest xml:lang="en-US">
+	<Request>
+		<RequestAction>Track</RequestAction>
+		<RequestOption>activity</RequestOption>
+	</Request>
+	<TrackingNumber>{TRACKING_NUMBER}</TrackingNumber>
+</TrackRequest>
