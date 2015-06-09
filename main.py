@@ -1,158 +1,56 @@
 #!/usr/bin/env python
 
+import argparse # command line arguments (--password)
 
-# Since we have to hard-code the field names, set them
-# all up here so they can be changed later if the CSVs change
-import csv
-
-# regex used to match and replace a link path in the HTML templates
-
+import time
 import logging
-import upsdata
+
+import csv
+import re
+from functools import partial
+#from getpass import getpass
+
+import upsdata # separate code under upsdata directory
+# settings in config.py
+from config import (params, 
+                    shipments_heading, pslips_heading, 
+                    contacts_heading,  mail_fieldtags,
+                    item_column_labels)
+
+# for email functionality
+import smtplib
+import os.path
+from email.MIMEMultipart import MIMEMultipart
+from email.MIMEText import MIMEText
+from email.Utils import formatdate
 
 
-class params:
-    contacts_csv = 'contacts.csv'
-    shipments_csv = 'shipments.csv'
-    packingslips_csv = 'packing_slips.csv'
-    log_file = 'logfile.txt'
-    bigvendor_code = 99999
+dlr_email_template = open(params['dlr_email_template_file']).read()
+BigVendor_email_template = open(params['BigVendor_email_template_file']).read()
 
-    dlr_email_template_file = 'Dealer_email.html'
-    bigvendor_email_template_file = 'BigVendor_email.html'
-
-    # Credentials created via http://www.ups.com/upsdeveloperkit
-    # to avoid hardcoding, run this through the argument parser instead.
-    ups_access_license = "XXXXXXXXX"
-    ups_userid = "XXXXXXX"
-    ups_password = "XXXXXXX"
-
-    # Used only for creating the link for an email recipient
-    ups_web_root = 'http://wwwapps.ups.com/WebTracking/track?track=yes&trackNums='
-
-    gmail_userid = "xxxxxxx"
-    gmail_password = None
-    # gmail password is specified with "--password xxxx" command line option.
-    # If this flag isn't provided AND the value above isn't set, the user
-    # will be prompted for a password for the first email to be sent.
-
-    email_from_name = "Company Name Shipping"
-    email_subject_line = "Your order has shipped!"
-
-    email_address_for_company_records = "companyemail+ccrecords_real@gmail.com"
-    email_address_for_contact_info_updating = "companyemail+contactupdate_real@gmail.com"
-
-    # The 'simulated_emails' option causes the emailer to create HTML files in the
-    # working directory containing the email example, instead of actually sending
-    # anything to any email address. Overrides the "testing mode" below.
-    simulated_emails = False
-
-    # The 'email_in_testing_mode' option allows email addresses found in the
-    # customer contacts sheet to be replaced by these testing addresses.
-    # This has no effect if "simulated_emails" is True.
-    email_in_testing_mode = False
-    test_email_recipient_as_customer = "test+customer_sim@gmail.com"
-    test_email_recipient_as_records = "test+ccrecords_sim@gmail.com"
-    test_email_recipient_as_contactupdating = "test+contactupdate_sim@gmail.com"
-
-    # date_not_available_message = ... # Implemented in the "upsdata" module
+contacts_dtable = list(csv.DictReader(open(params['contacts_csv'], 'rU')))
+shipments_dtable = list(csv.DictReader(open(params['shipments_csv'], 'rU')))
+pslips_dtable = list(csv.DictReader(open(params['packingslips_csv'], 'rU')))
 
 
-class shipments_heading:
-    cust_id = 'Customer'
-    bigvendor_ref_id = 'TableFieldBigVendor'
-
-
-class pslips_heading:
-    slip_id = 'Packing Slip'
-    cust_id = 'Customer'
-    # the input file has two "Customer" columns. 
-    # this will match the second (right-hand) one.
-
-    order_id = 'Order'
-    bigvendor_ref_id = 'Reference 5'
-
-    addr_name = 'Name'
-    addr_line1 = "Address"
-    addr_line2 = "Address2"
-    addr_line3 = "Address3"
-    addr_city = 'City'
-    addr_state = 'State/Province'
-    addr_pcode = 'Postal Code'
-
-    shipvia = 'Ship Via'
-    tracknum = 'Tracking Number'
-
-    description = 'Rev Description'
-    partcode = 'Part'
-    quantity = 'Qty'
-
-
-class contacts_heading:
-    cust_id = 'Customer'
-    name = 'Name'
-    email = 'EMail Address'
-
-
-class mail_fieldtags:
-    dealer_name = 'putncdealernamehere'
-    bigvendor_tagid = 'putbigvendor_tagidhere'  # Big Vendor Co. orders only
-    co_orderid = 'putco_orderidhere'
-    date = 'putdatehere'
-    tracknum = 'placetrackingnumberhere'
-    a_name = 'putnamehere'
-    a_address = 'putaddresshere'
-    a_citysz = 'putcityszhere'
-    itemtable = 'puttablehere'
-    # tracklink =  #set below after loading template files
-
-
-class TemplateValuesIncomplete(Exception):
+class Error(Exception):
+    """Base class for exceptions in this module."""
     pass
 
 
-class TableRecordNotFound(Exception):
-    pass
+class TableRecordNotFound(Error):
+    """Exception raised for (...).
+    Attributes:
+        expr -- input expression in which the error occurred
+        msg  -- explanation of the error
+    """
+    def __init__(self, msg1, msg2):
+        self.msg1, self.msg2 = msg1, msg2
 
+class ContactInfoMissing(Error):
+    def __init__(self, msg):
+        self.msg = msg
 
-class ContactRecordNotFound(Exception):
-    pass
-
-
-class ContactInfoIncomplete(Exception):
-    pass
-
-
-global dlr_email_template
-global bigvendor_email_template
-
-# change to param reference later (once the params are just the file name)
-dlr_email_template = open(params.dlr_email_template_file).read()
-bigvendor_email_template = open(params.bigvendor_email_template_file).read()
-
-
-def log(line):
-    print line
-    logging.info(line)
-
-
-global logfile;
-logfile = []
-#global log_missing_contacts; log_missing_contacts = []
-
-global contacts_dtable
-global shipments_dtable
-global pslips_dtable
-contacts_dtable = list(csv.DictReader(open(params.contacts_csv, 'rU')))
-shipments_dtable = list(csv.DictReader(open(params.shipments_csv, 'rU')))
-pslips_dtable = list(csv.DictReader(open(params.packingslips_csv, 'rU')))
-
-# Convert all convertable strings to a numeric type
-for table in [contacts_dtable, shipments_dtable, pslips_dtable]:
-    for row in table:
-        for key in row.keys():
-            if row[key].isdigit():
-                row[key] = int(row[key])
 
 
 class PackedItem(object):
@@ -160,7 +58,6 @@ class PackedItem(object):
         self.part_code = part_code
         self.description = description
         self.quantity = quantity
-        # TO ADD: QUANTITY (not included in current data set)
 
     def __repr__(self):
         template = "PackedItem object: code={0}, descr={1}, quant={2}"
@@ -170,143 +67,288 @@ class PackedItem(object):
 
 class Notification(object):
     def __init__(self, slip_id):
+        self.slip_id = int(slip_id)
 
-        log('=' * 80)
-        log("Started filling fields: Slip [%s]" % slip_id)
+        self.flag_template_incomplete = False 
+        self.flag_no_email_address = False 
+        self.flag_bad_tracking_number = False
+        self.flag_no_greeting_name = False
 
-        self.slip_id = slip_id
+        missing_value_text = params['text_placeholder_if_info_missing']
 
-        from functools import partial
+        slip_rows = [row for row in pslips_dtable 
+                     if row[pslips_heading['slip_id']] == slip_id]
 
-        query_slips = partial(dtable_query, dtable=pslips_dtable,
-                              index_field=pslips_heading.slip_id,
-                              index_id=self.slip_id)
+        # should always return at least one row
+        try:
+            slip_first = slip_rows[0]
+        except IndexError:
+            log("Attempted to look up a Slip ID that isn't in the slip list: %s" % slip_id)
+            raise
+        
+        self.order_id = slip_first[pslips_heading['order_id']]
 
-        self.order_id = query_slips(output_field=pslips_heading.order_id)
-
-        tracknum = query_slips(output_field=pslips_heading.tracknum)
+        # Look up UPS information using upsdata (in subfolder)
+        tracknum = slip_first[pslips_heading['tracknum']]
         self.tracking_number = str(tracknum).upper().strip()
-        self.expected_date = get_expected_date(self.tracking_number)
+        try:
+            self.expected_date = get_expected_date(self.tracking_number)
+        except upsdata.TrackingNumberInvalid:
+            log("Invalid tracking number: " + self.tracking_number)
+            self.bad_tracking_number = True
+            self.flag_template_incomplete = True
+            self.expected_date = missing_value_text
 
-        self.items = get_item_list(self.slip_id)
+        # record packed items, used to generate listing in email later
+        self.items = [PackedItem(part_code=row[pslips_heading['partcode']],
+                                 description=row[pslips_heading['description']],
+                                 quantity=row[pslips_heading['quantity']])
+                      for row in slip_rows]
 
-        slip_cust_id = query_slips(output_field=pslips_heading.cust_id)
-
-        # for bigvendor customers: compare "Reference 5" to "TableFieldBigVendor" in shipments 
+        # for BigVendor customers: compare "Reference 4" to "ShortChar01" in shipments 
         #   to determine customer ID
-        if slip_cust_id == params.bigvendor_code:
 
-            self.is_bigvendor = True
-            # get "Reference 5" from packing slip
-            self.bigvendor_tagid = query_slips(output_field=pslips_heading.bigvendor_ref_id)
+        if slip_first[pslips_heading['cust_id']] == params['BigVendor_code']:
 
-            self.customer_id = dtable_query(dtable=shipments_dtable,
-                                            index_field=shipments_heading.bigvendor_ref_id,
-                                            index_id=self.bigvendor_tagid,
-                                            output_field=shipments_heading.cust_id)
-        else:
-            self.is_bigvendor = False
-            self.bigvendor_tagid = None
-            self.customer_id = query_slips(output_field=pslips_heading.cust_id)
+            self.is_BigVendor = True
+            self.dns = slip_first[pslips_heading['BigVendor_dns_number']]
 
-        self.name_line, self.address_html, self.citysz_line = get_address_fields(slip_id)
+            # get "Reference 5" from packing slip: we'll use this to look up the Shipments
+            # row that has this same value under "ShortChar01"
+            shortchar_val = slip_first[pslips_heading['BigVendor_shortchar_id']]
 
-        self.contact_name, self.contact_email = get_contact_information(self.customer_id)
-
-        if self.contact_email:
+            self.greeting_name = slip_first[pslips_heading['addr_name']]
+            email_subject_line = params['email_subject_line_jd']
             try:
-                self.email_content = self.get_filled_template()
-            except TemplateValuesIncomplete as e:
-                log("One or email template values is missing: %s" % repr(e.args))
-            log("Finished filling fields: slip [%s]" % slip_id)
+               self.customer_id = dtable_query(dtable=shipments_dtable,
+                                               index_field=shipments_heading['BigVendor_shortchar_lookup'],
+                                               index_id=shortchar_val,
+                                               output_field=shipments_heading['cust_id'])
+            except TableRecordNotFound as e:
+                self.customer_id = missing_value_text
+                self.flag_template_incomplete = True
+
+        else: #non-BigVendor
+
+            self.is_BigVendor = False
+            self.dns = None
+            self.customer_id = slip_first[pslips_heading['cust_id']]
+            email_subject_line = params['email_subject_line_non_jd']
+            try:
+                self.greeting_name = dtable_query(dtable=shipments_dtable,
+                                                index_field=shipments_heading['cust_id'],
+                                                index_id=self.customer_id,
+                                                output_field=shipments_heading['name'])
+            except TableRecordNotFound as e:
+                self.greeting_name = missing_value_text
+                self.flag_template_incomplete = True
+                self.flag_no_greeting_name = True
+
+        if not self.flag_no_greeting_name:
+            try:
+                assert len(self.greeting_name) > 0
+            except AssertionError as e:
+                log('Email address record found for cust.id [%s] but name is blank'
+                    % customer_id)
+                self.flag_template_incomplete = True
+                self.flag_no_greeting_name = True
+
+        self.name_line = slip_first[pslips_heading['addr_name']]
+
+        address_fields = [pslips_heading['addr_line1'],
+                          pslips_heading['addr_line2'],
+                          pslips_heading['addr_line3']]
+
+        address_lines = [slip_first[f] for f in address_fields]
+
+        address_lines_nonblank = filter(len, address_lines)
+        self.address_html = '<br>'.join(address_lines_nonblank)
+
+        #format final address line
+        city = slip_first[pslips_heading['addr_city']]
+        state = slip_first[pslips_heading['addr_state']]
+        pcode = slip_first[pslips_heading['addr_pcode']]
+        self.citysz_line = '{c}, {s} {p}'.format(c=city, s=state, p=pcode)
+
+        try:
+            self.contact_email = get_contact_email(self.customer_id)
+        except ContactInfoMissing as e:
+            self.contact_email = missing_value_text
+            self.flag_no_email_address = True
+
+        self.email_content = self.get_filled_template(replace_missing_with=missing_value_text)
+
+        # used to produce issue notification email sent to company address if needed
+        problems = ["<p>Customer email could not be sent:</p><ul>"]
+            
+        # Decide whether email can be sent to customer
+        if all([not self.flag_template_incomplete, not self.flag_no_email_address,
+                not self.flag_bad_tracking_number, not self.flag_no_greeting_name]):
+
+            # flags indicate that nothing is missing: verify output text, then proceed
+            try:
+                assert missing_value_text not in self.email_content
+                assert missing_value_text not in self.contact_email
+            except AssertionError:
+                problems.append("<li>Placeholder text was present in an email " 
+                                "that wasn't flagged with missing data.</li>")
+
+            # otherwise no problems: send it
+            log("Attempting to send email to customer address: %s"
+                % self.contact_email)
+
+            if params['email_in_testing_mode']:
+                actual_email_destination = params['test_email_recipient_as_customer']
+                log("(but this is in testing mode, so actually sending to: %s" % 
+                    actual_email_destination)
+            else:
+                actual_email_destination = self.contact_email
+
+            result = send_gmail(gmail_username=params['gmail_userid'], 
+                       gmail_pwd=params['gmail_password'],
+                       send_from=params['email_from_name'], 
+                       send_to=actual_email_destination, 
+                       cc_to=params['email_address_for_company_records'],
+                       subject=email_subject_line,
+                       html_content=self.email_content, 
+                       simulation_mode=params['simulated_emails'])
+            log(result)
+
         else:
-            log("Skipping slip [%s] (no contact email on record)" % slip_id)
+            # There is either a missing template value or a missing 
+            # customer contact name/email
+            if self.flag_template_incomplete:
+                prob = "One or more values needed to fill the email template was missing."
+                problems.append("<li>" + prob + "</li>")
+                log(prob)
+            if self.flag_no_email_address:
+                prob = "Customer email address could not be found in Contacts CSV."
+                problems.append("<li>" + prob + "</li>")
+                log(prob)
+            if self.flag_no_greeting_name:
+                assert not self.is_BigVendor # packing slip should always have a customer name
+                prob = ("For this non-JD order, customer name for email greeting could not be "
+                       "pulled from the customer shipments CSV through a customer ID match.")
+                problems.append("<li>" + prob + "</li>")
+                log(prob)
+            if self.flag_bad_tracking_number:
+                prob = "Tracking number is missing or reported invalid by UPS API."
+                problems.append("<li>" + prob + "</li>")
+                log(prob)
+
+            object_info = ['%s: %s' % (k, v) for k, v in vars(self).items()]
+            notification_details = '<br><br>'.join(sorted(object_info))
+            problems.append("</ul> <br><br> <b>Debugging info:</b> <br><br>\n" 
+                            + notification_details)
+
+            email_note = '\n'.join(problems)
+            email_note_subject = ("Slip ID %s: could not send customer shipping "
+                                  "notification" % self.slip_id)
+            
+            # Send detailed info in a notification email to internal address
+            send_internal_email(subject=email_note_subject, 
+                                content=email_note)
+
+            # Send a clean copy of the shipping info (with missing info noted)
+            # to the internal notification address
+            send_internal_email(subject=("Incomplete notification for "
+                                         "slip ID %s" % self.slip_id),
+                                content=self.email_content)
+
+        #when sending email
+
+        #    raise
+
 
     def get_html_item_table(self):
 
         # table can be rearranged by changing the order of both the
         # heading names and the item attributes here
 
-        heading_names = ['Part No.', 'Description', 'Quantity']
+        heading_names = [item_column_labels['part'],
+                         item_column_labels['description'],
+                         item_column_labels['quantity']
+                         ]
 
         values_arranged = [(item.part_code,
                             item.description,
                             item.quantity) for item in self.items]
 
-        cell = lambda val: '<td>%s</td>' % val
+        def cell(val): 
+            return '<td>%s</td>' % val
 
-        row = lambda value_tuple: (  '<tr>'
-                                     + ''.join([cell(val) for val in value_tuple])
-                                     + '</tr>')
+        def row(value_tuple): 
+            cells = ''.join([cell(val) for val in value_tuple])
+            return ''.join(['<tr>', cells, '</tr>'])
 
-        grid = lambda value_tuple_list: '\n\t'.join([row(i) for i in value_tuple_list])
+        def grid(value_tuple_list):
+            rows = [row(i) for i in value_tuple_list]
+            return '\n\t'.join(rows)
+
+        def table(heading_row, main_table):
+            # not html5 standard, but still renders in current browsers
+            table_outer_template = ('<table cellpadding="3" border="1">\n\t'
+                                    '{}\n\t'
+                                    '</table>')
+            all_rows = '\n\t'.join([heading_row, main_table])
+            return table_outer_template.format(all_rows)
 
         header = row(heading_names)
         main_table = grid(values_arranged)
 
-        # not html5 standard, but still renders in current browsers
-        table_tag = '<table cellpadding="3" border="1">'
-        table = table_tag + '\n\t%s\n</table>' % '\n\t'.join([header, main_table])
-        return table
+        full_table = table(header, main_table)
+        return full_table
 
 
-    def get_filled_template(self):
-
-        # Later updates should replace this clunky test-string-replacement
-        # with something more robust (e.g., Jinja?)
+    def get_filled_template(self, replace_missing_with):
 
         import re
 
         mt = mail_fieldtags
 
+        #null_values_in_template = False
+
         # Don't need separate logic for the two templates:
-        # the bigvendor_tagid tag isn't in the non-bigvendor dealer template,
+        # the DNS tag isn't in the non-BigVendor dealer template,
         # so we can run the template.replace() for that pair
         # and nothing will happen.
 
-        replacing = {mt.dealer_name: self.contact_name,
-                     mt.co_orderid: self.order_id,
-                     mt.date: self.expected_date,
-                     mt.tracknum: self.tracking_number,
-                     mt.a_name: self.name_line,
-                     mt.a_address: self.address_html,
-                     mt.a_citysz: self.citysz_line,
-                     mt.itemtable: self.get_html_item_table()
-        }
+        replacing = {mt['greeting_name']: self.greeting_name,
+                     mt['fso']: self.order_id,
+                     mt['date']: self.expected_date,
+                     mt['tracknum']: self.tracking_number,
+                     mt['a_name']: self.name_line,
+                     mt['a_address']: self.address_html,
+                     mt['a_citysz']: self.citysz_line,
+                     mt['itemtable']: self.get_html_item_table(),
+                     }
 
-        if self.is_bigvendor:
-            template = bigvendor_email_template
-            assert self.bigvendor_tagid is not None
-            replacing[mt.bigvendor_tagid] = self.bigvendor_tagid  # add to list of replacement fields
+        try:
+            assert all([s is not None for s in replacing.values()]) #not including dns
+        except AssertionError:
+            raise
+
+        if self.is_BigVendor:
+            template = BigVendor_email_template
+            assert self.dns is not None
+            replacing[mt['dns']] = self.dns  # add to list of replacement fields
+            #For BigVendor orders, greet recipient with the "Name" field taken from packing slips 
+            #(this is also used in address lines for both BigVendor and non-BigVendor orders)
+            #replacing[mt['dealer_name']] = self.name_line
 
         else:
+            #For non-BigVendor orders, greet recipient with the name from contacts CSV
+            #replacing[mt['dealer_name']] = self.contact_name
             template = dlr_email_template
-            assert self.bigvendor_tagid is None
+            assert self.dns is None
 
         # The template has some local path stuff mixed in, so we need to expand
         # the text to replace to be the entire URL around 'placetrackingstringhere'
 
         link_tag = re.findall(r"<A HREF=.*" + "placetrackingstringhere" + "\">",
                               template)[0]
-        # print link_tag
-        replacing[link_tag] = '<A HREF="%s">' % (params.ups_web_root
+        replacing[link_tag] = '<A HREF="%s">' % (params['ups_web_root']
                                                  + self.tracking_number)
-
-        # print mail_fieldtags
-
-        for field, value in replacing.items():  # the keys are each of the replaced codes
-
-            # Throw an exception if any value is missing, except in the
-            # special case of a 
-            if value is None:
-                raise TemplateValuesIncomplete(field, value)
-
-            str_value = str(value)
-
-            try:
-                template = template.replace(field, str_value)
-            except TypeError:
-                raise
 
         try:
             # MS word adds a lot of stuff in the header that isn't useful
@@ -320,133 +362,17 @@ class Notification(object):
         except:
             pass
 
+        for field, value in replacing.items():  # the keys are each of the replaced codes
+            try:
+                assert field in template
+            except AssertionError:
+                log("field not found in template: %s" % field)
+            if value is None:
+                value = replace_missing_with
+            template = template.replace(field, str(value))
+
         return template
 
-
-def get_contact_information(customer_id):
-    # Contact table information (often missing)
-
-    from functools import partial
-
-    query_contact = partial(dtable_query, dtable=contacts_dtable,
-                            index_field=contacts_heading.cust_id,
-                            index_id=customer_id)
-
-    try:
-        contact_name = query_contact(output_field=contacts_heading.name)
-        contact_email = query_contact(output_field=contacts_heading.email)
-    except TableRecordNotFound as e:
-        raise ContactRecordNotFound(customer_id)
-
-    if contact_name:
-        try:
-            assert len(contact_name) > 0
-        except AssertionError as e:
-            log('Contact record found for cust.id [%s] but name is blank'
-                % customer_id)
-            raise ContactInfoIncomplete(e.args)
-
-    if contact_email:
-        try:
-            assert len(contact_email) > 0 and '@' in contact_email
-            # could also use a proper regex for email validation
-        except AssertionError as e:
-            log('Contact record found for cust.id [%s] but email is blank or invalid'
-                % customer_id)
-            raise ContactInfoIncomplete(e.args)
-
-    return contact_name, contact_email
-
-
-def send_contact_update_email(customer_id):
-    from getpass import getpass
-
-    log("Sending an email to update records")
-
-    if params.email_in_testing_mode:
-        recipient = params.test_email_recipient_as_contactupdating
-    else:
-        recipient = params.email_address_for_contact_info_updating
-
-    if not params.gmail_password:
-        params.gmail_password = getpass("Gmail password: ")
-
-    subject = ("Notification: missing contact "
-               "information for customer ID %s" % customer_id)
-    message = subject
-
-    result = send_gmail(gmail_username=params.gmail_userid,
-                        gmail_pwd=params.gmail_password,
-                        send_from=params.email_from_name,
-                        send_to=recipient,
-                        cc_to=None,
-                        subject=message,
-                        html_content=message,
-                        simulation_mode=params.simulated_emails,
-    )
-    log("Contact info update request email sent for customer ID: %s"
-        % customer_id)
-
-
-def send_missing_data_email(slip_id):
-    log("Sending an email notification about missing data")
-
-    if params.email_in_testing_mode:
-        recipient = params.test_email_recipient_as_records
-    else:
-        recipient = params.email_address_for_company_records
-
-    subject = "Notification regarding packing slip ID %s" % slip_id
-    message = ("Order records are missing data required to "
-               "produce a shipment notification email for the "
-               "order associated with packing slip ID:  %s" % slip_id)
-
-    result = send_gmail(gmail_username=params.gmail_userid,
-                        gmail_pwd=params.gmail_password,
-                        send_from=params.email_from_name,
-                        send_to=recipient,
-                        cc_to=None,
-                        subject=subject,
-                        html_content=message,
-                        simulation_mode=params.simulated_emails,
-    )
-    log("Contact info update request email sent for Slip ID: %s"
-        % slip_id)
-    # params.email_address_for_contact_info_updating
-
-
-def get_address_fields(slip_id):
-    #print get_dtable_row(dtable=pslips_dtable,
-    #                     index_field=pslips_heading.slip_id,
-    #                     index_id=slip_id)
-
-    from functools import partial
-
-    query_slips = partial(dtable_query, dtable=pslips_dtable,
-                          index_field=pslips_heading.slip_id,
-                          index_id=slip_id)
-
-    #format address lines for one HTML replacement field
-
-    name_line = query_slips(output_field=pslips_heading.addr_name)
-
-    address_fields = [pslips_heading.addr_line1,
-                      pslips_heading.addr_line2,
-                      pslips_heading.addr_line3]
-
-    address_lines = [query_slips(output_field=f) for f in address_fields]
-
-    address_lines_nonblank = filter(len, address_lines)
-    address_html = '<br>'.join(address_lines_nonblank)
-
-    #format final address line
-
-    city = query_slips(output_field=pslips_heading.addr_city)
-    state = query_slips(output_field=pslips_heading.addr_state)
-    pcode = query_slips(output_field=pslips_heading.addr_pcode)
-    citysz_line = '{c}, {s} {p}'.format(c=city, s=state, p=pcode)
-
-    return name_line, address_html, citysz_line
 
 
 def dtable_query(dtable, index_field, index_id, output_field):
@@ -457,71 +383,152 @@ def dtable_query(dtable, index_field, index_id, output_field):
         raise TableRecordNotFound(index_field, index_id)
 
 
-# used only to print debugging information
-def get_dtable_row(dtable, index_field, index_id):
-    for row in dtable:
-        if row[index_field] == index_id:
-            return row
-    else:
-        raise TableRecordNotFound(index_field, index_id)
-
-
-def get_item_list(slip_id):
-    '''Construct table of items for a given Order ID using the packingslips CSV'''
-
-    import csv
-
-
-    itemrows = [row for row in pslips_dtable
-                if row[pslips_heading.slip_id] == slip_id]
-
-    #the csv includes a "Line" field that counts up for items in an order
-    # could be useful as a consistency check while testing...
-    countup = [row['Line'] for row in itemrows]
-    assert len(countup) == len(set(countup))  # i.e., all unique values
-    assert max(countup) - min(countup) == len(countup) - 1
-
-    # not pulling just from the top item per slip id, so we can't use the 
-    # query_slips used elsewhere (that just looks on the 
-    # top matching row)
-
-    items = [PackedItem(part_code=row[pslips_heading.partcode],
-                        description=row[pslips_heading.description],
-                        quantity=row[pslips_heading.quantity])
-             for row in itemrows]
-    if len(items) == 0:
-        raise NoSlipIdMatch(slip_id)
-
-    return items
-
-
 def get_expected_date(tracking_number):
     '''check expected format, e.g., 1Z6351950343296108
      then pull up information from UPS-querying module'''
 
     #from upsdata import tracking_info
-    import upsdata
+    #import upsdata
 
     tracking_number = str(tracking_number)
     # if completely numeric, it was converted to int earlier
 
     if not tracking_number:
         raise upsdata.TrackingNumberInvalid
-
     elif len(tracking_number) == 12 and tracking_number.isdigit():
         raise upsdata.TrackingNumberInvalid  # Fedex    
-
     elif len(tracking_number) != 18 or tracking_number[0:2].upper() != "1Z":
         raise upsdata.TrackingNumberInvalid  # Non-UPS-formatted, unknown
-
     try:
-        track_result = upsdata.tracking_info(userid=params.ups_userid,
-                                             password=params.ups_password,
-                                             access_license=params.ups_access_license,
+        track_result = upsdata.tracking_info(userid=params['ups_userid'],
+                                             password=params['ups_password'],
+                                             access_license=params['ups_access_license'],
                                              tracking_number=tracking_number)
         return track_result
     except:
         raise
+
+
+def send_internal_email(subject, content):
+    log("Sending internal email, subject: %s" % subject)
+    if params['email_in_testing_mode']:
+        recipient = params['test_email_recipient_as_contactupdating']
+    else:
+        recipient = params['email_address_for_contact_info_updating']
+    #if not params['gmail_password']:
+    #    params['gmail_password'] = getpass("Gmail password: ")
+
+    result = send_gmail(gmail_username=params['gmail_userid'],
+                        gmail_pwd=params['gmail_password'],
+                        send_from=params['email_from_name_for_internal_notes'],
+                        send_to=recipient,
+                        cc_to=None,
+                        subject=subject,
+                        html_content=content,
+                        simulation_mode=params['simulated_emails'],
+                        )
+    log(result)
+
+def get_address_fields(slip_id, string_if_empty):
+
+    def query_slips(output_field):
+        qs = partial(dtable_query, dtable=pslips_dtable,
+                          index_field=pslips_heading['slip_id'],
+                          index_id=slip_id)
+        try:
+            out = qs(output_field)
+            if not out: 
+                out = string_if_empty
+        except TableRecordNotFound as e:
+            raise e("slip ID not found")
+
+
+    #format address lines for one HTML replacement field
+
+    name_line = query_slips(output_field=pslips_heading['addr_name'])
+
+    address_fields = [pslips_heading['addr_line1'],
+                      pslips_heading['addr_line2'],
+                      pslips_heading['addr_line3']]
+
+    address_lines = [query_slips(output_field=f) for f in address_fields]
+
+    address_lines_nonblank = filter(len, address_lines)
+    address_html = '<br>'.join(address_lines_nonblank)
+
+    #format final address line
+
+    city = query_slips(output_field=pslips_heading['addr_city'])
+    state = query_slips(output_field=pslips_heading['addr_state'])
+    pcode = query_slips(output_field=pslips_heading['addr_pcode'])
+    citysz_line = '{c}, {s} {p}'.format(c=city, s=state, p=pcode)
+
+    return name_line, address_html, citysz_line
+
+
+def get_contact_email(customer_id):
+    # Contact table information (often missing)
+
+    query_contact = partial(dtable_query, dtable=contacts_dtable,
+                            index_field=contacts_heading['cust_id'],
+                            index_id=customer_id)
+
+    try:
+        #contact_name = query_contact(output_field=contacts_heading['name'])
+        contact_email = query_contact(output_field=contacts_heading['email'])
+    except TableRecordNotFound as e:
+        raise ContactInfoMissing(customer_id)
+
+    if contact_email:
+        try:
+            assert len(contact_email) > 0
+            assert "@" in contact_email and "." in contact_email
+        except AssertionError as e:
+            log('Email address record found for cust.id [%s] but name is blank or'
+                ' does not match an email address format.'
+                % customer_id)
+            raise ContactInfoMissing(e.args)
+
+    #if contact_email:
+    #    try:
+    #        assert len(contact_email) > 0 and '@' in contact_email
+    #        # could also use a proper regex for email validation
+    #    except AssertionError as e:
+    #        log('Contact record found for cust.id [%s] but email is blank or invalid'
+    #            % customer_id)
+    #        raise ContactInfoMissing(e.args)
+
+    return contact_email
+
+
+def run_job():
+
+    # Convert all convertable strings to a numeric type
+    for table in [contacts_dtable, shipments_dtable, pslips_dtable]:
+        for row in table:
+            for key in row.keys():
+                if row[key].isdigit():
+                    row[key] = int(row[key])
+
+    all_slip_ids = [r[pslips_heading['slip_id']]
+                    for r in pslips_dtable]
+    unique_slip_ids = sorted(set(all_slip_ids))
+
+    notifications = []
+
+    for slip_id in unique_slip_ids:
+        log('=' * 80)
+        log("Starting slip [%s]" % slip_id)
+
+        n = Notification(slip_id)
+        notifications.append(n)
+
+
+def log(line):
+    timestamp = time.strftime("%H:%M:%S")
+    datestamp = time.strftime("%Y/%m/%d")
+    print "%s %s: %s" % (datestamp, timestamp, line)
+    logging.info(line)
 
 
 def send_gmail(gmail_username, gmail_pwd,
@@ -531,212 +538,84 @@ def send_gmail(gmail_username, gmail_pwd,
         it will show as being sent from the gmail account's 
         address as well. '''
 
-    import smtplib
-    #from smtplib import SMTPAuthenticationError
-
-    from email.MIMEMultipart import MIMEMultipart
-    from email.MIMEText import MIMEText
-    from email.Utils import formatdate
-
     if simulation_mode:
-        import os.path
-
         log("Using simulation mode.")
         # save file
         output_filename = "test_email_for_" + send_to
 
         while os.path.exists(output_filename + '.html'):
             output_filename += " next"
+
         output_filename += '.html'
 
         row = lambda text: "<P><B>%s</B></P>\n" % text
-        output = (row('TO: ' + send_to) +
-                  row('CC: ' + cc_to) +
-                  row('SUBJECT: ' + subject) +
+        output = (row('TO: ' + repr(send_to)) +
+                  row('CC: ' + repr(cc_to)) +
+                  row('SUBJECT: ' + repr(subject)) +
                   html_content)
 
         with open(output_filename, "w") as out_file:
             out_file.write(output)
+        result = "Simulated email saved as %s" % output_filename
 
-        log("Simulated email saved as %s" % output_filename)
-        return None
+    else:
+        #set email metadata
+        msg = MIMEMultipart()
+        msg['From'] = send_from
+        msg['To'] = send_to
+        msg['CC'] = cc_to  
+        msg['Date'] = formatdate(localtime=True)
+        msg['Subject'] = subject
 
-    #set email metadata
-    msg = MIMEMultipart()
-    msg['From'] = send_from
-    msg['To'] = send_to
-    msg['CC'] = cc_to  #newly added, untested
-    msg['Date'] = formatdate(localtime=True)
-    msg['Subject'] = subject
+        #attach email content, tagged as an HTML-based email
+        msg.attach(MIMEText(html_content, 'html'))
 
-    #attach email content, tagged as an HTML-based email
-    msg.attach(MIMEText(html_content, 'html'))
-
-    #log in to gmail outgoing server and submit
-    server = smtplib.SMTP("smtp.gmail.com", 587)
-    server.ehlo()
-    server.starttls()
-    server.ehlo
-
-    try:
-        server.login(gmail_username, gmail_pwd)
-    except smtplib.SMTPAuthenticationError:
-        log("INCORRECT LOGIN/PASSWORD")
-        return server.quit()
-
-    server.sendmail(send_from, send_to, msg.as_string())
-
-    #log("*** MAIL SENT TO: %s" % send_to)
-    return server.quit()
-
-
-def run_job():
-    import csv
-    from functools import partial
-    from getpass import getpass
-
-    #test_run_rows = range(33, 48)
-
-    unique_slip_ids = sorted(set([r[pslips_heading.slip_id]
-                                  for r in pslips_dtable]))
-
-    for slip_id in unique_slip_ids:
-
+        #log in to gmail outgoing server and submit
+        server = smtplib.SMTP("smtp.gmail.com", 587)
         try:
-            n = Notification(slip_id)
-        except TableRecordNotFound as e:
-            error_info = repr(e.args)
-            log("CSV input is missing data needed to identify records from slip id: {0}, {1}"
-                .format(slip_id, error_info))
-            send_missing_data_email(slip_id)  # (n, slip_id?
-            continue
-        except upsdata.TrackingNumberInvalid as e:
-            error_info = repr(e.args)
-            log("Tracking number is invalid: {0}, {1}"
-                .format(slip_id, error_info))
-            send_missing_data_email(slip_id)
-            continue
-        except TemplateValuesIncomplete as e:
-            error_info = repr(e.args)
-            log("CSV input is missing data needed to produce email template: %s"
-                % error_info)
-            send_missing_data_email(slip_id)  # (n, slip_id?
-            continue
-        except ContactRecordNotFound as e:
-            error_info = repr(e.args)
-            customerid = e.args[0]
-            log("Contact record not found: %s" % error_info)
-            send_contact_update_email(customerid)  # ()
-            continue
-        except ContactInfoIncomplete as e:
-            error_info = repr(e.args)
-            customerid = e.args[0]
-            error_info = repr(e.args)
-            log("Contact info incomplete: %s" % error_info)
-            send_contact_update_email(customerid)
-            continue
-        except:
-            raise
-
-        if params.email_in_testing_mode:
-            cust_address = params.test_email_recipient_as_customer
-            cc_address = params.test_email_recipient_as_records
-        else:
-            cust_address = n.contact_email
-            cc_address = params.email_address_for_company_records
-
-        log("Starting email to: %s" % n.contact_email)
-
-        if not params.gmail_password:
-            params.gmail_password = getpass("Gmail password: ")
-
-        result = send_gmail(gmail_username=params.gmail_userid,
-                            gmail_pwd=params.gmail_password,
-                            send_from=params.email_from_name,
-                            send_to=cust_address,
-                            cc_to=cc_address,
-                            subject=params.email_subject_line,
-                            html_content=n.email_content,
-                            simulation_mode=params.simulated_emails,
-        )
-        log("Email sent for Slip ID: [%s] to: [%s]" % (n.slip_id, n.contact_email))
+            server.ehlo()
+            server.starttls()
+            server.ehlo
+            login_result = server.login(gmail_username, gmail_pwd)
+            log("Email server login result:" + str(login_result))
+            server.sendmail(send_from, send_to, msg.as_string())
+            result = "Done: no errors reported by mail server."
+        except smtplib.SMTPException as e:
+            result = "Error reported by email server: %s" % str(e)
+        finally:
+            server.quit()
+    return result
 
 
-def print_info(notification_object):
-    n = notification_object
-
-    header = lambda s: '\n' + s.upper() + '\n' + "-" * len(s)
-
-    print '\n' + '=' * 50
-    print header("showing info for slip ID: %s" % n.slip_id)
-    print header("fields taken directly from packing slip CSV")
-    print "associated order id:", n.order_id
-    print "tracking number:", n.tracking_number
-    print "tracking date message:", get_expected_date(n.tracking_number)
-    print "ship-to name:", n.name_line
-    print "ship-to street address (multiline html):\n", n.address_html
-    print "ship-to citysz_line:", n.citysz_line
-
-    print "\nshipped items:\n", n.items
-
-    print "\nshipped items, as html table:\n", n.get_html_item_table()
-
-    print "\nIs bigvendor dealer? (code %s):" % params.bigvendor_code, n.is_bigvendor
-
-    print header("fields taken from shipments CSV (ref'd by Order ID")
-    print ("customer ID (taken directly from slip or referenced from shipments csv if "
-           "the ID in the slip is %s" % str(params.bigvendor_code)), ": ", n.customer_id
-    print "\nbigvendor_tagid code ('TableFieldBigVendor') if bigvendor dealer:", n.bigvendor_tagid
-
-    print header("fields taken from contacts CSV (ref'd by Customer ID")
-    print "contact name:", n.contact_name
-    print "contact email:", n.contact_email
-
-
-def test(slip_id=777777):
+def test(slip_id="9990007"):
     test1 = Notification(slip_id=slip_id)
-    #test2 = Notification(slip_id=125775)
-
-    print_info(test1)
-    print
-
     try:
         print test1.email_content
         with open("test_email_slip_%s.html" % str(slip_id), "w") as text_file:
             text_file.write(test1.email_content)
     except AttributeError:
-        print ("no email generated.")
+        log("no email generated.")
+    log(str(dir(test1)))
 
 
 def main():
-    # Commented code could be brought back if we want to be able to specify
-    # CSV files upon executing instead of hard-coding the names in params above.
-    import argparse
-
-    parser = argparse.ArgumentParser(description='UPS lookup & email template filling and sending.')
-    #parser.add_argument('-c', '--contacts', dest='contacts', type=str, help='CSV containing customer info indexed by "Customer" column')
-    #parser.add_argument('-p', '--packingslips', dest='packingslips', type=str, help='CSV containing shipment info indexed by "Ordera xxxxx column')
-    #parser.add_argument('-s', '--shipments', dest='shipments', type=str, help="CSV containing a xxxxx column")
+    parser = argparse.ArgumentParser(description='UPS lookup & email '
+                                     'template filling and sending.')
     parser.add_argument('--password', dest='gmail_pass', type=str,
-                        help="gmail password (username is hard-coded in parameters")
+                        help="gmail password (username is hard-coded in parameters)",
+                        required=False)
+
     args = parser.parse_args()
-
-    logging.basicConfig(filename=params.log_file, level=logging.DEBUG)
-
-    #if not all([args.contacts, args.packingslips, args.shipments]):
-    #    print args.contacts
-    #    print args.packingslips
-    #    print args.shipments
-    #    raise parser.error("one or more required filenames not included")
-
+    
     if args.gmail_pass:
-        params.gmail_password = args.gmail_pass
+        params['gmail_password'] = args.gmail_pass
+    elif 'gmail_password' not in params:
+        raise UserWarning('gmail password not in config or command line arguments')
+
+    #params['gmail_password'] = args.gmail_pass
 
     run_job()
 
 
 if __name__ == '__main__':
     main()
-
-
-

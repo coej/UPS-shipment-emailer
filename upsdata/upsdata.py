@@ -16,7 +16,7 @@ class TrackingNumberInvalid(Exception):
     pass
 
 def tracking_info(userid, password, access_license, tracking_number, testing=False):
-    
+    from config import options
     import os
     import urllib2
     from datetime import datetime
@@ -27,8 +27,7 @@ def tracking_info(userid, password, access_license, tracking_number, testing=Fal
     # the downloaded xmltodict_static.py file:
     # import xmltodict
     
-    no_date_message = ("Delivery date information is not currently available. "
-                       "Please see the tracking link for delivery information.")
+    no_date_message = options['unavailable_msg']
     ups_testing_url = "https://wwwcie.ups.com/ups.app/xml/Track"
     ups_tracking_url = "https://www.ups.com/ups.app/xml/Track"
 
@@ -90,22 +89,12 @@ def tracking_info(userid, password, access_license, tracking_number, testing=Fal
         return no_date_message
     
 
-def Test():
-    ups_tester_number = '1Z12345E6692804405'
+def Test(access_license, userid, password, tracking_number):
     #userid = raw_input("userid: ")
     #password = raw_input("password: ")
     #access_license = raw_input("access license number: ")
     
-    import sys
-    if len(sys.argv) > 1:
-        tracking_number = sys.argv[1]
-    else:
-        tracking_number = ups_tester_number
-    
-    access_license = "xxxxxx"
-    userid = "xxxxxx"
-    password = "xxxxxx" 
-    
+
     print TrackingInfo(userid = userid,
                        password = password,
                        access_license = access_license,
@@ -113,4 +102,21 @@ def Test():
                        testing=True)
     
 if __name__=='__main__':
-    Test()
+    import sys
+    assert len(sys.argv) >= 4
+
+    if len(sys.argv) > 4:
+        tracknum = sys.argv[4]
+    else:
+        tracknum = '1Z12345E6692804405' # UPS's tracker-testing number
+    #access_license = "AAAAAAAAAAAAAAAA"
+    #userid = "xxxxxxxx"
+    #password = "xxxxxxxx" 
+    
+
+    #run as: "python upsdata.py [userid] [password] [license] [tracknum]"
+
+    Test(access_license=sys.argv[1], 
+         userid=sys.argv[2],
+         password=sys.argv[3],
+         tracking_number=sys.argv[4])
